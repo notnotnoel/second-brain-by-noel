@@ -5,7 +5,7 @@
   "summary": "Shared memory for every AI agent on this Mac",
   "now": "The Obsidian vault holds the details and is the source of truth. The second brain holds cards and an index that point into it.",
   "facts": ["Details live in the Obsidian vault; cards and the index live in ~/SecondBrain",
-            "Helpers (filer, librarian) run on a local model",
+            "Helpers (filer, librarian) run on a local model, Claude Code, an Anthropic API key, or rules only",
             "Agents reach memory through the tools brief, recall, expand, log, write and sync",
             "The helpers write only inside the Second Brain folder of the Obsidian vault"],
   "links": ["obsidian-vault", "local-model-server"]},
