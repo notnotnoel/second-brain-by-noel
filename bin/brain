@@ -1,0 +1,16 @@
+#!/bin/bash
+# Launcher for Second Brain. Works from any directory.
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+APP="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
+PY="${BRAIN_PYTHON:-}"
+if [ -z "$PY" ] && [ -f "$APP/.python" ]; then PY="$(cat "$APP/.python")"; fi
+if [ -z "$PY" ] || [ ! -x "$PY" ]; then PY="$(command -v python3)"; fi
+export PYTHONPATH="$APP${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONUNBUFFERED=1
+cd "$APP" || exit 1   # so Python always loads this copy of the app
+exec "$PY" -m brain.cli "$@"

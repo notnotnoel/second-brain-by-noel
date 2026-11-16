@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.DS_Store
+.python
+config.json
+seed.local.json
+index.db*
+digests.json
+state.json
+logs/
+vault/

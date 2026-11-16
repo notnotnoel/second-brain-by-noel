@@ -1,0 +1,16 @@
+[
+ {"title": "__OWNER__", "type": "person", "owner": true, "pin": true, "aliases": ["me"],
+  "summary": "Owner of this memory", "facts": [], "links": ["second-brain"]},
+ {"title": "Second Brain", "type": "project", "aliases": ["shared agent memory", "memory vault"],
+  "summary": "Shared memory for every AI agent on this Mac",
+  "now": "The Obsidian vault holds the details and is the source of truth. The second brain holds cards and an index that point into it.",
+  "facts": ["Details live in the Obsidian vault; cards and the index live in ~/SecondBrain",
+            "Helpers (filer, librarian) run on a local model",
+            "Agents reach memory through the tools brief, recall, expand, log, write and sync",
+            "The helpers write only inside the Second Brain folder of the Obsidian vault"],
+  "links": ["obsidian-vault", "local-model-server"]},
+ {"title": "Obsidian vault", "type": "tool", "aliases": ["Obsidian"],
+  "summary": "The owner's Obsidian vault: the source of truth for all note details", "links": ["second-brain"]},
+ {"title": "Local model server", "type": "tool", "aliases": ["oMLX", "Ollama", "LM Studio"],
+  "summary": "OpenAI-compatible model server on this Mac that the helpers use", "links": ["second-brain"]}
+]
