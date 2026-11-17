@@ -7,11 +7,11 @@ One shared memory for Claude and every other AI agent on your Mac.
 Your Obsidian vault holds the details. A helper model keeps a set of short cards that point into it. Any agent asks the cards first, then opens only the note it needs.
 
 - **You stop repeating yourself.** Name a project and the agent gets what it is, what was done, and where the details are.
-- **Agents spend fewer tokens.** A lookup is capped at about 500 tokens. The start-of-task brief is about 400. On my vault that is a median 93% fewer tokens than reading every note that names the topic.¹
+- **Agents spend fewer tokens.** A lookup is capped at about 500 tokens. The start-of-task brief is about 400. On my 100-note vault, answering 18 real questions took about 1,500 tokens per correct answer, against about 10,500 for an agent that greps and reads.¹
 - **Your notes stay yours.** They stay as plain Markdown in Obsidian. The helpers read them and never change them.
 - **Runs with or without a local model.** Use a local model, your Claude Code sign-in, your own Anthropic API key, or rules only.
 
-> Status: version 1.2. Built and run on one Mac mini (M4, 24GB) with oMLX. macOS only for now. Treat it as a working personal tool, not a product.
+> Status: version 1.3. Built and run on one Mac mini (M4, 24GB) with oMLX. macOS only for now. Treat it as a working personal tool, not a product.
 
 ## How it works
 
@@ -144,6 +144,7 @@ The helpers do narrow jobs: fill a small JSON form, write one grounded sentence.
 - Tested on one machine. Expect rough edges on other setups.
 - Models make mistakes, small local ones most. The checks drop unsupported lines, so cards can be thinner than you expect. They should not be wrong.
 - macOS blocks background programs from iCloud folders until you allow them. `brain doctor` tells you if it is blocked and which file to allow.
+- Search is by words, not meaning. A question that shares no word with the note ("headcount" for "team", "bottling demo" for "Bottle Co") can still miss unless you turn on the optional embedding model. 5 of my 18 benchmark questions missed this way or because the answer sat in several notes.
 - It links notes to cards by name. If a note never names a project, add the name or an alias to the card.
 - No Windows or Linux installer yet. The code is plain Python and should run; the background service part is macOS only.
 
@@ -169,12 +170,13 @@ skills/       the remember skill
 ```
 
 - Standard library only. No packages to install.
+- Benchmark: `python3 tools/bench.py --demo --check` fails if Second Brain stops answering at least as many questions as a grep agent with fewer total tokens.
 - Test without a model: `python3 tools/mock_llm.py 8011`, point `llm.base_url` at it, set `BRAIN_HOME` to a scratch folder.
 - The model layer is `brain/llm.py`: one `chat()` for all four providers.
 - Keep the rule: no helper may edit a note outside the `Second Brain` folder.
 
 See [CHANGELOG.md](CHANGELOG.md). MIT licensed.
 
-¹ How the number was measured: for 8 topics in my own vault (85 notes), I compared the recall cap (500 tokens) with the tokens in every note that names the topic. Savings ranged from 26% (a topic with three short notes) to 98%; the median was 93%. Your vault will differ.
+¹ How the number was measured. Run `python3 tools/bench.py --demo` to reproduce the method on a synthetic vault, or point it at your own vault and questions. For each question it counts the tokens an agent reads until the answer is in front of it, and checks the answer against a written key. Second Brain is compared with an agent that greps for the question's rarest words and reads what it finds. The grep agent gets no help from the answer key. On my vault (100 notes, 18 questions, one run): Second Brain answered 13 of 18 correctly with 19,004 tokens in total (median 564 per question, 2.6 calls); the grep agent answered 9 of 18 with 94,338 tokens (median 4,878, 5.2 calls). Over the questions both answered, the median saving was 79%. The older "93%" compared the 500-token cap with reading every note that names the topic. That baseline is real but few agents work that way, so this README no longer leads with it. Fixed cost per session is about 650 tokens of tool descriptions plus the brief. On a small, well-worded vault a single grep can be cheaper for an easy lookup: on the synthetic demo vault grep's median is lower (61 tokens against 147) while Second Brain still uses about a quarter of the total. Your vault will differ.
 
 More builds at [noelpaliath.com](https://noelpaliath.com). Created by Noel Paliath; not affiliated with Anthropic or Obsidian. Views are my own.
