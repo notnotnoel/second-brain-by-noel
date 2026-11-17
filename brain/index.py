@@ -353,7 +353,8 @@ _STOP_Q = {"the", "a", "an", "of", "to", "in", "on", "for", "and", "or", "is", "
             "did", "do", "i", "my", "me", "about", "with", "how", "that", "this", "it", "have", "has", "been", "done",
             "so", "far", "which", "who", "where", "why", "does", "status", "latest", "recent", "last", "any", "all",
             "be", "at", "by", "from", "as", "not", "we", "you", "he", "she", "his", "her", "their", "there",
-            "many", "much", "now"}
+            "many", "much", "now", "big", "large", "long", "should", "behind", "cover", "covers", "every",
+            "list", "help", "tell", "show", "give", "find", "need", "want"}
 
 
 def query_terms(text: str):
@@ -449,19 +450,17 @@ def search_sections(db, query: str, scopes, limit: int = 3, per_note: int = 2):
                           "ORDER BY sc LIMIT 120", (" OR ".join('"%s"' % t for t in terms),)).fetchall()
     except sqlite3.OperationalError:
         return []
-    # rarity weights: a word found in few sections ("pmo") counts for more than one found everywhere ("many")
-    total = db.execute("SELECT COUNT(*) c FROM secs").fetchone()["c"] or 1
-    idf = {}
+    # Only words that occur in some section can count: "headcount" or "abuse" appearing nowhere must not
+    # dilute the match for the words that do.
+    present = []
     for t in terms:
         try:
-            df = db.execute("SELECT COUNT(*) c FROM sfts WHERE sfts MATCH ?", ('"%s"' % t,)).fetchone()["c"]
+            if db.execute("SELECT 1 FROM sfts WHERE sfts MATCH ? LIMIT 1", ('"%s"' % t,)).fetchone():
+                present.append(t)
         except sqlite3.OperationalError:
-            df = 0
-        if df:
-            idf[t] = math.log(1 + total / (1 + df))
-    if not idf:
+            pass
+    if not present:
         return []
-    weight = sum(idf.values())
     scored = []
     for r in rows:
         n = db.execute("SELECT * FROM notes WHERE id=?", (r["note_id"],)).fetchone()
@@ -472,12 +471,11 @@ def search_sections(db, query: str, scopes, limit: int = 3, per_note: int = 2):
         flat = util.norm(n["title"] + " " + sec["path"] + " " + text)
         words = _stems(flat.split()) | {util.squash(n["title"])} | {util.squash(h) for h in sec["path"].split(" › ")}
         headw = _stems(util.norm(sec["path"]).split()) | {util.squash(n["title"])}
-        got = {t for t in idf if t in words or _stem(t) in words}
-        cover = sum(idf[t] for t in got) / weight
+        cover = sum(1 for t in present if t in words or _stem(t) in words) / len(present)
         if cover < 0.5:
             continue
         phrase = sum(1 for a, b in zip(terms, terms[1:]) if (a + " " + b) in flat)
-        head = sum(idf[t] for t in idf if t in headw or _stem(t) in headw) / weight
+        head = sum(1 for t in present if t in headw or _stem(t) in headw) / len(present)
         scored.append((cover * 10 + phrase * 3 + head * 4 - r["sc"] * 0.15, n, sec, text))
     scored.sort(key=lambda x: -x[0])
     out, per = [], {}
