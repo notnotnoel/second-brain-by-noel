@@ -21,9 +21,9 @@ def brief() -> str:
 
 
 def _doc_line(r, outline: bool = False) -> str:
-    line = "- %s: %s (id: %s)" % (vault.show_path(r["path"]), (r["summary"] or "")[:130] or "note", r["id"])
+    line = "- %s: %s (id: %s)" % (vault.show_path(r["path"]), util.clip(r["summary"] or "", 130) or "note", r["id"])
     if outline and r["outline"]:
-        line += "\n  sections: " + r["outline"][:220]
+        line += "\n  sections: " + util.clip(r["outline"], 220)
     return line
 
 
@@ -62,6 +62,21 @@ def recall(query: str, scopes=None, max_tokens=None, agent: str = "agent") -> st
     db = index.connect()
     out, used, hit_ids = [DATA_NOTE], 0, []
 
+    # 0. the sections of the owner's notes that answer the question (no model). Found first so the cards
+    # leave room for them: a pointer that names the section costs far less than opening the whole note.
+    sec_ids, sec_text = set(), ""
+    sec_lines = ["Best matches in Obsidian (open a section with expand(\"id\")):"]
+    for n_, sec_, snip in index.search_sections(db, query, scopes):
+        hid = " ".join(re.sub(r"[()\[\]]", " ", sec_["heading"]).split())
+        line = '- %s › %s (id: %s#%s): "%s"' % (n_["title"], util.clip(sec_["path"].split(" › ")[-1], 60),
+                                                n_["id"], hid, snip)
+        if util.tokens("\n".join(sec_lines + [line])) > cap * 0.5:
+            break
+        sec_lines.append(line)
+        sec_ids.add(n_["id"])
+    if len(sec_lines) > 1:
+        sec_text = "\n".join(sec_lines)
+
     # 1. names -> cards (no model, no search)
     cards = []
     for nid in index.match_aliases(db, query):
@@ -69,12 +84,16 @@ def recall(query: str, scopes=None, max_tokens=None, agent: str = "agent") -> st
         if r and r["scope"] in scopes and r["status"] != "archived":
             cards.append(r)
     cards = cards[:4]
-    per_card = int(cap * 0.7 / max(1, len(cards)))
+    per_card = int((cap - util.tokens(sec_text)) * 0.7 / max(1, len(cards)))
     for r in cards:
         text = _card_text(r, per_card)
         out.append(text)
         used += util.tokens(text)
         hit_ids.append(r["id"])
+    if sec_text:
+        out.append(sec_text)
+        used += util.tokens(sec_text)
+        hit_ids.extend(i for i in sec_ids if i not in hit_ids)
 
     # 2. one line per linked card
     linked = []
@@ -99,6 +118,7 @@ def recall(query: str, scopes=None, max_tokens=None, agent: str = "agent") -> st
         if r and r["scope"] in scopes and r["status"] != "archived" and r["id"] not in seen_docs:
             doc_rows.append((r, True))
             seen_docs.add(r["id"])
+    seen_docs |= sec_ids      # already shown with the section that matters
     for c in cards:
         for r in index.docs_for(db, c["id"], scopes, limit=4 if len(cards) == 1 else 2):
             if r["id"] not in seen_docs:
@@ -117,13 +137,14 @@ def recall(query: str, scopes=None, max_tokens=None, agent: str = "agent") -> st
             out.append(text)
             used += util.tokens(text)
 
-    # 3. events and sources, only when the cards are not enough
-    # (always a few: a card can match while the answer sits in a note that never names the card)
+    # 3. events and sources. Only notes that score close to the best match: the long tail was noise.
     if True:
-        narrow = bool(cards or doc_rows) and not DETAIL_CUES.search(query)
-        rows = index.search(db, query, scopes, limit=4 if narrow else 10)
+        narrow = bool(cards or doc_rows or sec_ids) and not DETAIL_CUES.search(query)
+        scored = index.search(db, query, scopes, limit=3 if narrow else 6, with_scores=True)
+        top = max((sc for _, sc in scored), default=0)
         shown = "\n".join(out)
-        rows = [r for r in rows if r["id"] not in hit_ids and ("[[%s]]" % r["id"]) not in shown
+        rows = [r for r, sc in scored if sc >= 0.4 * top and r["id"] not in hit_ids
+                and ("[[%s]]" % r["id"]) not in shown
                 and (not r["path"].startswith("00-Core/") or r["id"] == "preferences")]
         lines = []
         for r in rows:
@@ -133,7 +154,7 @@ def recall(query: str, scopes=None, max_tokens=None, agent: str = "agent") -> st
                 line = _doc_line(r)
             else:
                 line = "- %s%s: %s (id: %s)" % ((when + " ") if when else "", r["title"],
-                                                 r["summary"] or body[:160], r["id"])
+                                                 r["summary"] or util.clip(body, 160), r["id"])
             if used + util.tokens("\n".join(lines + [line])) > cap:
                 break
             lines.append(line)
@@ -174,22 +195,28 @@ def expand(note_id: str, scopes=None, agent: str = "agent", max_tokens=None) -> 
     if section:
         want = util.norm(section)
         m = None
+        if want == "intro":      # the text before the first heading
+            first = re.search(r"^#{1,4}\s+", r["body"], re.M)
+            text = r["body"][:first.start() if first else len(r["body"])].strip()
         for hm in re.finditer(r"^(#{1,4})\s+(.+)$", r["body"], re.M):
             if util.norm(hm.group(2)) == want or (m is None and want in util.norm(hm.group(2))):
                 m = hm
                 if util.norm(hm.group(2)) == want:
                     break
-        if m:
+        if m and not text:
             rest = r["body"][m.end():]
             stop = re.search(r"^#{1,%d}\s+" % len(m.group(1)), rest, re.M)
             text = (m.group(0) + rest[:stop.start() if stop else len(rest)]).strip()
-    if not text:
-        text = r["body"].strip()
     events.use(r["id"], "expand")
     events.emit("expand", agent, "Opened %s" % r["title"], notes=[r["id"]])
     head = "%s\n### %s (id: %s)\n" % (DATA_NOTE, r["title"], r["id"])
     if r["origin"] == "obs":
         head += "File: %s\n" % vault.abs_path(r["path"])
+    if section and not text and r["outline"]:
+        return head + "No section matches '%s'. Sections: %s\n(Ask for one with expand(\"%s#Section\").)" % (
+            section, r["outline"], r["id"])
+    if not text:
+        text = r["body"].strip()
     out = head + util.trim_tokens(text, cap)
     if util.tokens(text) > cap and r["outline"]:
         out += "\nSections: %s\n(Ask for one with expand(\"%s#Section\"), or raise max_tokens.)" % (r["outline"], r["id"])

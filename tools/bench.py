@@ -119,11 +119,11 @@ def run_sb(q, gold):
             ctx += "\n" + r
             calls += 1
             opens += 1
-            if not has_all(ctx, gold) and "#" not in pid and "Sections:" in r and opens < 4:
+            if not has_all(ctx, gold) and "Sections:" in r and opens < 4 and ("#" not in pid or "No section matches" in r):
                 h = best_heading(r.split("Sections:", 1)[1].split("\n")[0], q)
                 if h:
                     t0 = time.time()
-                    r2 = mcp_server.call("expand", {"id": pid + "#" + h, "max_tokens": OPEN_TOKENS})
+                    r2 = mcp_server.call("expand", {"id": pid.split("#")[0] + "#" + h, "max_tokens": OPEN_TOKENS})
                     ms.append((time.time() - t0) * 1000)
                     ctx += "\n" + r2
                     calls += 1

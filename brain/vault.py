@@ -328,6 +328,36 @@ def walk(include_archive: bool = True, include_obs: bool = True):
         yield p, "obs", "obs/" + posix
 
 
+_HEAD = re.compile(r"^(#{1,4})[ \t]+(.+?)[ \t]*#*[ \t]*$")
+
+
+def split_sections(body: str):
+    """Heading sections of a note, in order: dicts with heading, path (Parent › Leaf), level, start, end.
+    A section runs to the next heading of any level. '#' lines inside code fences are not headings."""
+    heads, pos, fence = [], 0, False
+    for line in body.splitlines(keepends=True):
+        s = line.strip()
+        if s.startswith(("```", "~~~")):
+            fence = not fence
+        elif not fence:
+            m = _HEAD.match(line.rstrip("\r\n"))
+            if m:
+                heads.append((pos, pos + len(line), len(m.group(1)), m.group(2).strip()))
+        pos += len(line)
+    out, stack = [], []
+    if not heads or heads[0][0] >= 60:
+        end = heads[0][0] if heads else len(body)
+        if end >= 60:
+            out.append({"heading": "(intro)", "path": "(intro)", "level": 0, "start": 0, "end": end})
+    for i, (a, b, lvl, text) in enumerate(heads):
+        while stack and stack[-1][0] >= lvl:
+            stack.pop()
+        stack.append((lvl, text))
+        out.append({"heading": text, "path": " › ".join(t for _, t in stack), "level": lvl,
+                    "start": b, "end": heads[i + 1][0] if i + 1 < len(heads) else len(body)})
+    return out
+
+
 def doc_id(stem: str, taken) -> str:
     base = util.slugify(stem)
     if base in taken:

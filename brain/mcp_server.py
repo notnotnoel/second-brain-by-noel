@@ -18,14 +18,15 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {}}},
     {"name": "recall",
      "description": "Look up stored memory before making a decision. Name the people, projects or topics "
-                    "involved; returns their cards plus related notes, each with an id. Capped and cheap.",
+                    "involved; returns their cards, the best-matching note sections (open one with expand) and "
+                    "related notes. Capped and cheap.",
      "inputSchema": {"type": "object", "properties": {
          "query": {"type": "string", "description": "What you need to know, including entity names"},
          "max_tokens": {"type": "integer", "description": "Budget, default 500"}},
          "required": ["query"]}},
     {"name": "expand",
-     "description": "Read one note (or one section, as 'id#Heading') by an id returned from recall. Notes come "
-                    "from the owner's Obsidian vault; the reply includes the file path.",
+     "description": "Read one note, or just one section as 'id#Heading', by an id from recall. Prefer the "
+                    "section: it is far cheaper than the whole note. Notes come from the owner's Obsidian vault.",
      "inputSchema": {"type": "object", "properties": {
          "id": {"type": "string"},
          "max_tokens": {"type": "integer", "description": "Budget, default 500, up to 6000"}},
@@ -83,7 +84,7 @@ def handle(msg: dict):
                   "serverInfo": {"name": "second-brain", "version": __version__},
                   "instructions": "Shared memory. Cards here point to the details in the owner's Obsidian vault. "
                                   "Call brief() at the start and recall() before decisions; open the note paths "
-                                  "it returns (or expand). Save one-liners with log(), longer details with "
+                                  "it returns (or expand the section ids it lists). Save one-liners with log(), longer details with "
                                   "write(); after editing vault files directly, call sync()."}
     elif method == "ping":
         result = {}
