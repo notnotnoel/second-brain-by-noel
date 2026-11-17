@@ -40,7 +40,8 @@ def connect() -> sqlite3.Connection:
     db.executescript(SCHEMA)
     try:
         db.execute("CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(id UNINDEXED, title, body)")
-        db.execute("CREATE VIRTUAL TABLE IF NOT EXISTS sfts USING fts5(note_id UNINDEXED, ord UNINDEXED, heading, body)")
+        db.execute("CREATE VIRTUAL TABLE IF NOT EXISTS sfts USING fts5(note_id UNINDEXED, ord UNINDEXED, heading, body, "
+            "tokenize='porter unicode61')")
         db.execute("INSERT OR REPLACE INTO meta VALUES('fts','1')")
     except sqlite3.OperationalError:
         db.execute("INSERT OR REPLACE INTO meta VALUES('fts','0')")
@@ -351,7 +352,8 @@ def neighbours(db, nid: str):
 _STOP_Q = {"the", "a", "an", "of", "to", "in", "on", "for", "and", "or", "is", "are", "was", "what", "when",
             "did", "do", "i", "my", "me", "about", "with", "how", "that", "this", "it", "have", "has", "been", "done",
             "so", "far", "which", "who", "where", "why", "does", "status", "latest", "recent", "last", "any", "all",
-            "be", "at", "by", "from", "as", "not", "we", "you", "he", "she", "his", "her", "their", "there"}
+            "be", "at", "by", "from", "as", "not", "we", "you", "he", "she", "his", "her", "their", "there",
+            "many", "much", "now"}
 
 
 def query_terms(text: str):
@@ -447,7 +449,19 @@ def search_sections(db, query: str, scopes, limit: int = 3, per_note: int = 2):
                           "ORDER BY sc LIMIT 120", (" OR ".join('"%s"' % t for t in terms),)).fetchall()
     except sqlite3.OperationalError:
         return []
-    want = _stems(terms)
+    # rarity weights: a word found in few sections ("pmo") counts for more than one found everywhere ("many")
+    total = db.execute("SELECT COUNT(*) c FROM secs").fetchone()["c"] or 1
+    idf = {}
+    for t in terms:
+        try:
+            df = db.execute("SELECT COUNT(*) c FROM sfts WHERE sfts MATCH ?", ('"%s"' % t,)).fetchone()["c"]
+        except sqlite3.OperationalError:
+            df = 0
+        if df:
+            idf[t] = math.log(1 + total / (1 + df))
+    if not idf:
+        return []
+    weight = sum(idf.values())
     scored = []
     for r in rows:
         n = db.execute("SELECT * FROM notes WHERE id=?", (r["note_id"],)).fetchone()
@@ -456,11 +470,14 @@ def search_sections(db, query: str, scopes, limit: int = 3, per_note: int = 2):
             continue
         text = n["body"][sec["start"]:sec["end"]]
         flat = util.norm(n["title"] + " " + sec["path"] + " " + text)
-        cover = len(want & _stems(flat.split())) / len(want)
+        words = _stems(flat.split()) | {util.squash(n["title"])} | {util.squash(h) for h in sec["path"].split(" › ")}
+        headw = _stems(util.norm(sec["path"]).split()) | {util.squash(n["title"])}
+        got = {t for t in idf if t in words or _stem(t) in words}
+        cover = sum(idf[t] for t in got) / weight
         if cover < 0.5:
             continue
         phrase = sum(1 for a, b in zip(terms, terms[1:]) if (a + " " + b) in flat)
-        head = len(want & _stems(util.norm(sec["path"]).split())) / len(want)
+        head = sum(idf[t] for t in idf if t in headw or _stem(t) in headw) / weight
         scored.append((cover * 10 + phrase * 3 + head * 4 - r["sc"] * 0.15, n, sec, text))
     scored.sort(key=lambda x: -x[0])
     out, per = [], {}
