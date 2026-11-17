@@ -1,10 +1,10 @@
 """SQLite index over the vault: notes, aliases, link graph, full-text search, optional vectors.
 It is disposable: `brain reindex --full` rebuilds it from the Markdown files."""
 from __future__ import annotations
-import json, math, re, sqlite3, struct
+import functools, json, math, re, sqlite3, struct
 from . import config, digests, events, util, vault
 
-SCHEMA_VERSION = "2"
+SCHEMA_VERSION = "3"
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS notes(id TEXT PRIMARY KEY, path TEXT, type TEXT, status TEXT, scope TEXT,
   title TEXT, summary TEXT, date TEXT, updated TEXT, mtime REAL, hash TEXT, tokens INT, pin INT, body TEXT,
@@ -20,6 +20,9 @@ CREATE INDEX IF NOT EXISTS ix_src ON edges(src);
 CREATE INDEX IF NOT EXISTS ix_dst ON edges(dst);
 CREATE TABLE IF NOT EXISTS vectors(note_id TEXT PRIMARY KEY, hash TEXT, vec BLOB);
 CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
+CREATE TABLE IF NOT EXISTS secs(note_id TEXT, ord INT, heading TEXT, path TEXT, level INT, tokens INT,
+  start INT, end INT);
+CREATE INDEX IF NOT EXISTS ix_secs ON secs(note_id, ord);
 """
 
 
@@ -31,12 +34,14 @@ def connect() -> sqlite3.Connection:
     db.execute("CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT)")
     r = db.execute("SELECT v FROM meta WHERE k='schema'").fetchone()
     if not r or r["v"] != SCHEMA_VERSION:      # the index is disposable: rebuild it on a layout change
-        for t in ("notes", "aliases", "edges", "names", "fts"):
+        for t in ("notes", "aliases", "edges", "names", "fts", "secs", "sfts"):
             db.execute("DROP TABLE IF EXISTS %s" % t)
         db.execute("INSERT OR REPLACE INTO meta VALUES('schema',?)", (SCHEMA_VERSION,))
     db.executescript(SCHEMA)
     try:
         db.execute("CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(id UNINDEXED, title, body)")
+        db.execute("CREATE VIRTUAL TABLE IF NOT EXISTS sfts USING fts5(note_id UNINDEXED, ord UNINDEXED, heading, body, "
+            "tokenize='porter unicode61')")
         db.execute("INSERT OR REPLACE INTO meta VALUES('fts','1')")
     except sqlite3.OperationalError:
         db.execute("INSERT OR REPLACE INTO meta VALUES('fts','0')")
@@ -54,18 +59,29 @@ def _drop(db, nid):
     db.execute("DELETE FROM aliases WHERE note_id=?", (nid,))
     db.execute("DELETE FROM names WHERE note_id=?", (nid,))
     db.execute("DELETE FROM edges WHERE src=?", (nid,))
+    db.execute("DELETE FROM secs WHERE note_id=?", (nid,))
     if has_fts(db):
         db.execute("DELETE FROM fts WHERE id=?", (nid,))
+        db.execute("DELETE FROM sfts WHERE note_id=?", (nid,))
 
 
-def reindex(full: bool = False, quiet: bool = False) -> dict:
-    """Index new/changed notes, drop removed ones. Returns counts."""
+_last_scan = 0.0
+
+
+def reindex(full: bool = False, quiet: bool = False, max_age: float = 0.0) -> dict:
+    """Index new/changed notes, drop removed ones. Returns counts.
+    max_age: skip the scan if one finished this many seconds ago (reads use it; sync and write do not)."""
+    global _last_scan
+    import time
+    if max_age and not full and time.time() - _last_scan < max_age:
+        return {"added": [], "changed": [], "removed": []}
     db = connect()
     if full:
-        for t in ("notes", "aliases", "edges", "names"):
+        for t in ("notes", "aliases", "edges", "names", "secs"):
             db.execute("DELETE FROM %s" % t)
         if has_fts(db):
             db.execute("DELETE FROM fts")
+            db.execute("DELETE FROM sfts")
     known = {r["path"]: (r["id"], r["mtime"]) for r in db.execute("SELECT id, path, mtime FROM notes")}
     seen, added, changed = set(), [], []
     obs_on = vault.obs_root() is not None
@@ -131,6 +147,15 @@ def reindex(full: bool = False, quiet: bool = False) -> dict:
         if has_fts(db):
             db.execute("INSERT INTO fts VALUES(?,?,?)",
                        (n.id, " ".join([n.title] + (n.aliases if n.writable else []) + tags), n.body))
+            if n.is_doc:          # one search row per heading section, so recall can point at the section
+                for i, sec in enumerate(vault.split_sections(n.body)):
+                    text = n.body[sec["start"]:sec["end"]]
+                    if len(text.strip()) < 25:
+                        continue
+                    db.execute("INSERT INTO secs VALUES(?,?,?,?,?,?,?,?)",
+                               (n.id, i, sec["heading"], sec["path"], sec["level"], util.tokens(text),
+                                sec["start"], sec["end"]))
+                    db.execute("INSERT INTO sfts VALUES(?,?,?,?)", (n.id, i, sec["path"], text))
     if obs_on and not any(r.startswith("obs/") for r in seen) and any(r.startswith("obs/") for r in known):
         # The folder lists but no note can be read (macOS privacy block). Keep what is indexed.
         seen.update(rel for rel in known if rel.startswith("obs/"))
@@ -146,6 +171,7 @@ def reindex(full: bool = False, quiet: bool = False) -> dict:
         _derive(db)
     db.commit()
     db.close()
+    _last_scan = time.time()
     if not quiet and (added or changed or removed):
         events.emit("indexed", "watcher", "Indexed %d new, %d changed, %d removed" %
                     (len(added), len(changed), len(removed)), notes=(added + changed)[:40], removed=removed[:40])
@@ -332,16 +358,23 @@ def neighbours(db, nid: str):
     return out
 
 
-def _fts_query(text: str) -> str:
-    stop = {"the", "a", "an", "of", "to", "in", "on", "for", "and", "or", "is", "are", "was", "what", "when",
+_STOP_Q = {"the", "a", "an", "of", "to", "in", "on", "for", "and", "or", "is", "are", "was", "what", "when",
             "did", "do", "i", "my", "me", "about", "with", "how", "that", "this", "it", "have", "has", "been", "done",
             "so", "far", "which", "who", "where", "why", "does", "status", "latest", "recent", "last", "any", "all",
-            "be", "at", "by", "from", "as", "not", "we", "you", "he", "she", "his", "her", "their", "there"}
-    terms = [w for w in util.norm(text).split() if w not in stop and len(w) > 1]
-    return " OR ".join('"%s"' % t for t in terms[:12])
+            "be", "at", "by", "from", "as", "not", "we", "you", "he", "she", "his", "her", "their", "there",
+            "many", "much", "now", "big", "large", "long", "should", "behind", "cover", "covers", "every",
+            "list", "help", "tell", "show", "give", "find", "need", "want"}
 
 
-def search(db, query: str, scopes, limit: int = 12, types=None):
+def query_terms(text: str):
+    return [w for w in util.norm(text).split() if w not in _STOP_Q and len(w) > 1][:12]
+
+
+def _fts_query(text: str) -> str:
+    return " OR ".join('"%s"' % t for t in query_terms(text))
+
+
+def search(db, query: str, scopes, limit: int = 12, types=None, with_scores: bool = False):
     """Keyword search (BM25) with optional vector boost. Dormant notes rank lower."""
     q = _fts_query(query)
     rows = []
@@ -380,7 +413,93 @@ def search(db, query: str, scopes, limit: int = 12, types=None):
             s *= 1.0 + 0.3 * math.exp(-age / 60.0)
         out.append((s, r))
     out.sort(key=lambda x: -x[0])
+    if with_scores:
+        return [(r, s) for s, r in out[:limit]]
     return [r for _, r in out[:limit]]
+
+
+@functools.lru_cache(maxsize=200000)
+def _stem(w: str) -> str:
+    for suf, keep in (("ing", 4), ("ed", 3), ("es", 3), ("s", 3)):
+        if len(w) > keep + len(suf) - 1 and w.endswith(suf):
+            return w[:-len(suf)]
+    return w
+
+
+def _stems(words):
+    out = set()
+    for w in words:
+        out.add(w)
+        out.add(_stem(w))
+    return out
+
+
+def _best_line(text: str, terms, n: int = 170) -> str:
+    """The line or sentence of a section that best matches the query terms, shortened at a word boundary."""
+    want = _stems(terms)
+    best, score = "", -1
+    for raw in re.split(r"\n+|(?<=[.!?])\s+(?=[A-Z0-9*])", text):
+        line = re.sub(r"[*_`>#]|^\s*[-+]\s+|\[\[|\]\]", "", raw.replace("|", " / ")).strip()
+        if len(line) < 12:
+            continue
+        have = _stems(util.norm(line).split())
+        s = len(want & have) + 0.5 * sum(1 for a, b in zip(terms, terms[1:]) if (a + " " + b) in util.norm(line))
+        if s > score:
+            best, score = line, s
+    return util.clip(best, n)
+
+
+def search_sections(db, query: str, scopes, limit: int = 3, per_note: int = 2):
+    """Heading sections of the owner's notes that best match the question: (note row, section row, snippet).
+    A section needs at least half of the question's words; phrases in the same order rank higher."""
+    terms = query_terms(query)
+    if not terms or not has_fts(db):
+        return []
+    try:
+        rows = db.execute("SELECT note_id, ord, bm25(sfts, 0, 0, 5.0, 1.0) AS sc FROM sfts WHERE sfts MATCH ? "
+                          "ORDER BY sc LIMIT 40", (" OR ".join('"%s"' % t for t in terms),)).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    # Only words that occur in some section can count: "headcount" or "abuse" appearing nowhere must not
+    # dilute the match for the words that do.
+    present = []
+    for t in terms:
+        try:
+            if db.execute("SELECT 1 FROM sfts WHERE sfts MATCH ? LIMIT 1", ('"%s"' % t,)).fetchone():
+                present.append(t)
+        except sqlite3.OperationalError:
+            pass
+    if not present:
+        return []
+    scored = []
+    for r in rows:
+        # slice the section out of the note inside SQLite: some notes are hundreds of KB
+        sec = db.execute("SELECT s.*, n.title, n.type, n.scope, n.status, "
+                         "substr(n.body, s.start + 1, s.end - s.start) AS text "
+                         "FROM secs s JOIN notes n ON n.id = s.note_id WHERE s.note_id=? AND s.ord=?",
+                         (r["note_id"], r["ord"])).fetchone()
+        if not sec or sec["type"] != "doc" or sec["scope"] not in scopes or sec["status"] == "archived":
+            continue
+        n, text = {"id": sec["note_id"], "title": sec["title"]}, sec["text"]
+        flat = util.norm(n["title"] + " " + sec["path"] + " " + text)
+        words = _stems(flat.split()) | {util.squash(n["title"])} | {util.squash(h) for h in sec["path"].split(" › ")}
+        headw = _stems(util.norm(sec["path"]).split()) | {util.squash(n["title"])}
+        cover = sum(1 for t in present if t in words or _stem(t) in words) / len(present)
+        if cover < 0.5:
+            continue
+        phrase = sum(1 for a, b in zip(terms, terms[1:]) if (a + " " + b) in flat)
+        head = sum(1 for t in present if t in headw or _stem(t) in headw) / len(present)
+        scored.append((cover * 10 + phrase * 3 + head * 4 - r["sc"] * 0.15, n, sec, text))
+    scored.sort(key=lambda x: -x[0])
+    out, per = [], {}
+    for s, n, sec, text in scored:
+        if per.get(n["id"], 0) >= per_note:
+            continue
+        per[n["id"]] = per.get(n["id"], 0) + 1
+        out.append((n, sec, _best_line(text, terms)))
+        if len(out) >= limit:
+            break
+    return out
 
 
 # ---------- optional vectors (served by oMLX) ----------

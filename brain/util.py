@@ -46,6 +46,18 @@ def trim_tokens(text: str, cap: int) -> str:
     return cut.rstrip() + "\n… (trimmed; call expand for more)"
 
 
+def clip(text: str, n: int) -> str:
+    """Shorten to about n characters at a word boundary, never mid-word."""
+    text = " ".join(str(text or "").split())
+    if len(text) <= n:
+        return text
+    cut = text[:n]
+    sp = cut.rfind(" ")
+    if sp > n * 0.6:
+        cut = cut[:sp]
+    return cut.rstrip(" ,;:-.") + "…"
+
+
 def sha(text: str) -> str:
     return hashlib.sha1(text.encode("utf-8", "ignore")).hexdigest()[:12]
 
