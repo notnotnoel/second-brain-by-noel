@@ -183,7 +183,7 @@ def expand(note_id: str, scopes=None, agent: str = "agent", max_tokens=None) -> 
     section = None
     if "#" in note_id:
         note_id, section = note_id.split("#", 1)
-    index.reindex(quiet=True)
+    index.reindex(quiet=True, max_age=2.0)
     db = index.connect()
     nid = index.resolve_link(db, note_id.strip())
     r = db.execute("SELECT * FROM notes WHERE id=?", (nid,)).fetchone() if nid else None

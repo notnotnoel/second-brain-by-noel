@@ -62,7 +62,7 @@ def call(name: str, args: dict) -> str:
     if name == "brief":
         return recall.brief()
     if name == "recall":
-        index.reindex(quiet=True)
+        index.reindex(quiet=True, max_age=2.0)     # a scan per call was over half the server time
         return recall.recall(args.get("query", ""), SCOPES, args.get("max_tokens"), AGENT)
     if name == "expand":
         return recall.expand(args.get("id", ""), SCOPES, AGENT, args.get("max_tokens"))

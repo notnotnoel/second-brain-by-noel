@@ -1,7 +1,7 @@
 """SQLite index over the vault: notes, aliases, link graph, full-text search, optional vectors.
 It is disposable: `brain reindex --full` rebuilds it from the Markdown files."""
 from __future__ import annotations
-import json, math, re, sqlite3, struct
+import functools, json, math, re, sqlite3, struct
 from . import config, digests, events, util, vault
 
 SCHEMA_VERSION = "3"
@@ -65,8 +65,16 @@ def _drop(db, nid):
         db.execute("DELETE FROM sfts WHERE note_id=?", (nid,))
 
 
-def reindex(full: bool = False, quiet: bool = False) -> dict:
-    """Index new/changed notes, drop removed ones. Returns counts."""
+_last_scan = 0.0
+
+
+def reindex(full: bool = False, quiet: bool = False, max_age: float = 0.0) -> dict:
+    """Index new/changed notes, drop removed ones. Returns counts.
+    max_age: skip the scan if one finished this many seconds ago (reads use it; sync and write do not)."""
+    global _last_scan
+    import time
+    if max_age and not full and time.time() - _last_scan < max_age:
+        return {"added": [], "changed": [], "removed": []}
     db = connect()
     if full:
         for t in ("notes", "aliases", "edges", "names", "secs"):
@@ -163,6 +171,7 @@ def reindex(full: bool = False, quiet: bool = False) -> dict:
         _derive(db)
     db.commit()
     db.close()
+    _last_scan = time.time()
     if not quiet and (added or changed or removed):
         events.emit("indexed", "watcher", "Indexed %d new, %d changed, %d removed" %
                     (len(added), len(changed), len(removed)), notes=(added + changed)[:40], removed=removed[:40])
@@ -409,6 +418,7 @@ def search(db, query: str, scopes, limit: int = 12, types=None, with_scores: boo
     return [r for _, r in out[:limit]]
 
 
+@functools.lru_cache(maxsize=200000)
 def _stem(w: str) -> str:
     for suf, keep in (("ing", 4), ("ed", 3), ("es", 3), ("s", 3)):
         if len(w) > keep + len(suf) - 1 and w.endswith(suf):
@@ -447,7 +457,7 @@ def search_sections(db, query: str, scopes, limit: int = 3, per_note: int = 2):
         return []
     try:
         rows = db.execute("SELECT note_id, ord, bm25(sfts, 0, 0, 5.0, 1.0) AS sc FROM sfts WHERE sfts MATCH ? "
-                          "ORDER BY sc LIMIT 120", (" OR ".join('"%s"' % t for t in terms),)).fetchall()
+                          "ORDER BY sc LIMIT 40", (" OR ".join('"%s"' % t for t in terms),)).fetchall()
     except sqlite3.OperationalError:
         return []
     # Only words that occur in some section can count: "headcount" or "abuse" appearing nowhere must not
@@ -463,11 +473,14 @@ def search_sections(db, query: str, scopes, limit: int = 3, per_note: int = 2):
         return []
     scored = []
     for r in rows:
-        n = db.execute("SELECT * FROM notes WHERE id=?", (r["note_id"],)).fetchone()
-        sec = db.execute("SELECT * FROM secs WHERE note_id=? AND ord=?", (r["note_id"], r["ord"])).fetchone()
-        if not n or not sec or n["type"] != "doc" or n["scope"] not in scopes or n["status"] == "archived":
+        # slice the section out of the note inside SQLite: some notes are hundreds of KB
+        sec = db.execute("SELECT s.*, n.title, n.type, n.scope, n.status, "
+                         "substr(n.body, s.start + 1, s.end - s.start) AS text "
+                         "FROM secs s JOIN notes n ON n.id = s.note_id WHERE s.note_id=? AND s.ord=?",
+                         (r["note_id"], r["ord"])).fetchone()
+        if not sec or sec["type"] != "doc" or sec["scope"] not in scopes or sec["status"] == "archived":
             continue
-        text = n["body"][sec["start"]:sec["end"]]
+        n, text = {"id": sec["note_id"], "title": sec["title"]}, sec["text"]
         flat = util.norm(n["title"] + " " + sec["path"] + " " + text)
         words = _stems(flat.split()) | {util.squash(n["title"])} | {util.squash(h) for h in sec["path"].split(" › ")}
         headw = _stems(util.norm(sec["path"]).split()) | {util.squash(n["title"])}

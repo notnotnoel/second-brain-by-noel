@@ -380,6 +380,8 @@ def main():
     ap.add_argument("--home", help="scratch BRAIN_HOME (default: a temp folder)")
     ap.add_argument("--label", default="run")
     ap.add_argument("--json", help="write the full result here")
+    ap.add_argument("--check", action="store_true",
+                    help="exit 1 unless second-brain answers at least as many questions as smart grep, with fewer total tokens")
     a = ap.parse_args()
     tmp = Path(tempfile.mkdtemp(prefix="brain-bench-"))
     if a.demo:
@@ -398,6 +400,11 @@ def main():
     if a.json:
         Path(a.json).write_text(json.dumps(o, indent=1))
     shutil.rmtree(tmp, ignore_errors=True)
+    if a.check:
+        A = o["agents"]
+        good = A["sb"]["correct"] >= A["grep"]["correct"] and A["sb"]["total_tokens"] < A["grep"]["total_tokens"]
+        print("\ncheck:", "PASS" if good else "FAIL")
+        sys.exit(0 if good else 1)
 
 
 if __name__ == "__main__":
